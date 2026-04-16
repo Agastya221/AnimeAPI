@@ -604,25 +604,42 @@ export class AnimeKai {
           if (!lid || seen.has(lid)) continue;
           seen.add(lid);
 
-          const viewToken = await MegaUp.generateToken(lid);
-          const viewUrl = `${this.baseUrl}/ajax/links/view?id=${lid}&_=${viewToken}`;
-          const viewRes = await fetcher(viewUrl, true, "animekai", {
-            headers: this.ajaxHeaders(`${this.baseUrl}/watch/${animeSlug}`),
-          });
-          if (!viewRes?.success) continue;
-          const viewData = JSON.parse(viewRes.text);
+          try {
+            const viewToken = await MegaUp.generateToken(lid);
+            const viewUrl = `${this.baseUrl}/ajax/links/view?id=${lid}&_=${viewToken}`;
+            const viewRes = await fetcher(viewUrl, true, "animekai", {
+              headers: this.ajaxHeaders(`${this.baseUrl}/watch/${animeSlug}`),
+            });
+            if (!viewRes?.success) continue;
+            const viewData = JSON.parse(viewRes.text);
 
-          const decoded = await MegaUp.decodeIframeData(viewData.result);
-          const videoSources = await MegaUp.extract(decoded.url);
+            const decoded = await MegaUp.decodeIframeData(viewData.result);
+            const entryBase = {
+              name: `MegaUp ${$(item).text().trim()}${isDub ? " (Dub)" : ""}`,
+              url: decoded.url,
+              intro: decoded.skip.intro,
+              outro: decoded.skip.outro,
+              isDub,
+            };
 
-          results.push({
-            name: `MegaUp ${$(item).text().trim()}${isDub ? " (Dub)" : ""}`,
-            url: decoded.url,
-            intro: decoded.skip.intro,
-            outro: decoded.skip.outro,
-            isDub,
-            ...videoSources,
-          });
+            try {
+              const videoSources = await MegaUp.extract(decoded.url);
+              results.push({
+                ...entryBase,
+                ...videoSources,
+              });
+            } catch (extractErr) {
+              Logger.warn(`AnimeKai extract failed for ${decoded.url}; preserving iframe fallback. ${String(extractErr)}`);
+              results.push({
+                ...entryBase,
+                headers: {},
+                subtitles: [],
+                sources: [],
+              });
+            }
+          } catch (serverErr) {
+            Logger.warn(`AnimeKai server decode failed for ${animeSlug}/${lid}: ${String(serverErr)}`);
+          }
         }
       }
 

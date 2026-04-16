@@ -558,6 +558,167 @@ const normalizeServerName = (name: string) => {
     }
 };
 
+const mergeHianimeServers = (servers: {
+    sub?: Array<{ serverName: string; serverId: number | null; dataId?: string | null }>;
+    dub?: Array<{ serverName: string; serverId: number | null; dataId?: string | null }>;
+    raw?: Array<{ serverName: string; serverId: number | null; dataId?: string | null }>;
+}) => [
+    ...((servers.sub || []).map((item) => ({
+        type: "sub",
+        data_id: item.dataId || null,
+        server_id: item.serverId,
+        serverName: normalizeServerName(item.serverName),
+    }))),
+    ...((servers.dub || []).map((item) => ({
+        type: "dub",
+        data_id: item.dataId || null,
+        server_id: item.serverId,
+        serverName: normalizeServerName(item.serverName),
+    }))),
+    ...((servers.raw || []).map((item) => ({
+        type: "raw",
+        data_id: item.dataId || null,
+        server_id: item.serverId,
+        serverName: normalizeServerName(item.serverName),
+    }))),
+];
+
+const buildHianimeStreamResponse = (
+    server: string,
+    mergedServers: ReturnType<typeof mergeHianimeServers>,
+    stream: {
+        link?: string | null;
+        type?: string | null;
+        iframe?: string | null;
+        tracks?: Array<{
+            file: string;
+            label?: string;
+            kind?: string;
+            default?: boolean;
+        }>;
+        subtitles?: Array<{
+            file?: string;
+            url?: string;
+            label?: string;
+            lang?: string;
+            kind?: string;
+            default?: boolean;
+        }>;
+        intro?: { start: number; end: number } | null;
+        outro?: { start: number; end: number } | null;
+        anilistID?: number | null;
+        malID?: number | null;
+    }
+) => ({
+    streamingLink: [
+        {
+            link: stream.link || "",
+            type: stream.type || "hls",
+            server: normalizeServerName(server),
+            iframe: stream.iframe || "",
+        },
+    ],
+    tracks: stream.tracks || [],
+    subtitles: stream.subtitles || [],
+    intro: stream.intro || null,
+    outro: stream.outro || null,
+    server: normalizeServerName(server),
+    servers: mergedServers,
+    anilistID: stream.anilistID ?? null,
+    malID: stream.malID ?? null,
+});
+
+const hasUsableHianimeStream = (response: ReturnType<typeof buildHianimeStreamResponse>) => {
+    const current = response.streamingLink[0];
+    return Boolean(current?.link || current?.iframe);
+};
+
+const resolveHianimeStreamResponse = async (
+    animeEpisodeId: string,
+    server: AniwatchTypes.AnimeServers,
+    category: "sub" | "dub" | "raw"
+) => {
+    const [serversRaw, directSourcesRaw] = await Promise.all([
+        hianime.getEpisodeServers(animeEpisodeId),
+        hianime.getEpisodeSources(animeEpisodeId, server, category).catch((err) => {
+            log.warn(
+                { animeEpisodeId, server, category, err },
+                "hianime direct stream lookup failed; falling back to compat extractor"
+            );
+            return null;
+        }),
+    ]);
+
+    const servers = (serversRaw || {}) as {
+        sub?: Array<{ serverName: string; serverId: number | null; dataId?: string | null }>;
+        dub?: Array<{ serverName: string; serverId: number | null; dataId?: string | null }>;
+        raw?: Array<{ serverName: string; serverId: number | null; dataId?: string | null }>;
+    };
+    const mergedServers = mergeHianimeServers(servers);
+    const directSources = directSourcesRaw as
+        | (AniwatchTypes.ScrapedAnimeEpisodesSources & {
+              embedURL?: string;
+              tracks?: Array<{
+                  file: string;
+                  kind?: string;
+                  label?: string;
+                  default?: boolean;
+              }>;
+              outro?: { start: number; end: number };
+              anilistID?: number | null;
+              malID?: number | null;
+          })
+        | null;
+
+    const directResponse = buildHianimeStreamResponse(server, mergedServers, {
+        link: directSources?.sources?.[0]?.url || "",
+        type: String(directSources?.sources?.[0]?.type || "hls"),
+        iframe: directSources?.embedURL || "",
+        tracks: directSources?.tracks || [],
+        subtitles: directSources?.subtitles || [],
+        intro: directSources?.intro || null,
+        outro: directSources?.outro || null,
+        anilistID: directSources?.anilistID ?? null,
+        malID: directSources?.malID ?? null,
+    });
+
+    if (hasUsableHianimeStream(directResponse)) {
+        return directResponse;
+    }
+
+    for (const compatFallback of [false, true]) {
+        try {
+            const compat = await extractCompatStreamingInfo(animeEpisodeId, server, category, compatFallback);
+            const compatResponse = buildHianimeStreamResponse(server, mergedServers, {
+                link: compat.streamingLink[0]?.link || "",
+                type: String(compat.streamingLink[0]?.type || "hls"),
+                iframe: compat.streamingLink[0]?.iframe || "",
+                tracks: compat.tracks || [],
+                subtitles: compat.tracks || [],
+                intro: compat.intro || null,
+                outro: compat.outro || null,
+                anilistID: directSources?.anilistID ?? null,
+                malID: directSources?.malID ?? null,
+            });
+
+            if (hasUsableHianimeStream(compatResponse)) {
+                return {
+                    ...compatResponse,
+                    server: compat.server || compatResponse.server,
+                    servers: compat.servers?.length ? compat.servers : mergedServers,
+                };
+            }
+        } catch (err) {
+            log.warn(
+                { animeEpisodeId, server, category, compatFallback, err },
+                "hianime compat stream lookup failed"
+            );
+        }
+    }
+
+    return directResponse;
+};
+
 // /api/v2/hianime
 tatakaiRouter.get("/", (c) => c.redirect("/", 301));
 
@@ -567,54 +728,7 @@ tatakaiRouter.get("/stream", async (c) => {
     const animeEpisodeId = decodeURIComponent(query.id || query.animeEpisodeId || "");
     const server = decodeURIComponent(query.server || "HD-1") as AniwatchTypes.AnimeServers;
     const category = decodeURIComponent(query.type || query.category || "sub") as "sub" | "dub" | "raw";
-
-    const [sourcesRaw, serversRaw] = await Promise.all([
-        hianime.getEpisodeSources(animeEpisodeId, server, category),
-        hianime.getEpisodeServers(animeEpisodeId),
-    ]);
-
-    const sources = sourcesRaw as any;
-    const servers = serversRaw as any;
-
-    const mergedServers = [
-        ...(servers.sub || []).map((item: any) => ({
-            type: "sub",
-            data_id: item.dataId || null,
-            server_id: item.serverId,
-            serverName: normalizeServerName(item.serverName),
-        })),
-        ...(servers.dub || []).map((item: any) => ({
-            type: "dub",
-            data_id: item.dataId || null,
-            server_id: item.serverId,
-            serverName: normalizeServerName(item.serverName),
-        })),
-        ...(servers.raw || []).map((item: any) => ({
-            type: "raw",
-            data_id: item.dataId || null,
-            server_id: item.serverId,
-            serverName: normalizeServerName(item.serverName),
-        })),
-    ];
-
-    const response = {
-        streamingLink: [
-            {
-                link: sources.sources?.[0]?.url || "",
-                type: sources.sources?.[0]?.type || "hls",
-                server: normalizeServerName(server),
-                iframe: sources.embedURL || "",
-            },
-        ],
-        tracks: sources.tracks || [],
-        subtitles: sources.subtitles || [],
-        intro: sources.intro || null,
-        outro: sources.outro || null,
-        server: normalizeServerName(server),
-        servers: mergedServers,
-        anilistID: sources.anilistID ?? null,
-        malID: sources.malID ?? null,
-    };
+    const response = await resolveHianimeStreamResponse(animeEpisodeId, server, category);
 
     return c.json({ success: true, results: response }, 200);
 });
@@ -956,66 +1070,7 @@ tatakaiRouter.get("/episode/stream", async (c) => {
         | "sub"
         | "dub"
         | "raw";
-
-    const [sourcesRaw, serversRaw] = await Promise.all([
-        hianime.getEpisodeSources(animeEpisodeId, server, category),
-        hianime.getEpisodeServers(animeEpisodeId),
-    ]);
-
-    const sources = sourcesRaw as AniwatchTypes.ScrapedAnimeEpisodesSources & {
-        tracks?: Array<{
-            file: string;
-            kind?: string;
-            label?: string;
-            default?: boolean;
-        }>;
-        outro?: { start: number; end: number };
-    };
-    const servers = serversRaw as {
-        sub: Array<{ serverName: string; serverId: number | null; dataId?: string | null }>;
-        dub: Array<{ serverName: string; serverId: number | null; dataId?: string | null }>;
-        raw: Array<{ serverName: string; serverId: number | null; dataId?: string | null }>;
-    };
-
-    const mergedServers = [
-        ...servers.sub.map((item) => ({
-            type: "sub",
-            data_id: item.dataId || null,
-            server_id: item.serverId,
-            serverName: normalizeServerName(item.serverName),
-        })),
-        ...servers.dub.map((item) => ({
-            type: "dub",
-            data_id: item.dataId || null,
-            server_id: item.serverId,
-            serverName: normalizeServerName(item.serverName),
-        })),
-        ...servers.raw.map((item) => ({
-            type: "raw",
-            data_id: item.dataId || null,
-            server_id: item.serverId,
-            serverName: normalizeServerName(item.serverName),
-        })),
-    ];
-
-    const response = {
-        streamingLink: [
-            {
-                link: sources.sources?.[0]?.url || "",
-                type: sources.sources?.[0]?.type || "hls",
-                server: normalizeServerName(server),
-                iframe: sources.embedURL || "",
-            },
-        ],
-        tracks: sources.tracks || [],
-        subtitles: sources.subtitles || [],
-        intro: sources.intro || null,
-        outro: sources.outro || null,
-        server: normalizeServerName(server),
-        servers: mergedServers,
-        anilistID: sources.anilistID ?? null,
-        malID: sources.malID ?? null,
-    };
+    const response = await resolveHianimeStreamResponse(animeEpisodeId, server, category);
 
     return c.json(await ok(response), { status: 200 });
 });

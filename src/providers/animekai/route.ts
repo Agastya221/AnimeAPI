@@ -92,7 +92,17 @@ animekaiRoutes.get("/watch/:episodeId", async (c) => {
   const dubParam = c.req.query("dub");
   const subOrDub: "softsub" | "dub" = (dubParam === "true" || dubParam === "1") ? "dub" : "softsub";
 
-  const results = await AnimeKai.streams(episodeId, subOrDub);
+  let results = await AnimeKai.streams(episodeId, subOrDub);
+  if (results.length === 0) {
+    const servers = await AnimeKai.fetchEpisodeServers(episodeId, subOrDub);
+    results = servers.map((server) => ({
+      ...server,
+      headers: {},
+      subtitles: [],
+      sources: [],
+      isDub: subOrDub === "dub",
+    }));
+  }
   return c.json({ results });
 });
 

@@ -9,6 +9,10 @@ const DEFAULT_STREAM_PROXY_URLS = [
     "https://moko.tatakai.me/api/v1/streamingProxy",
 ];
 
+const STREAM_PROXY_PASSWORD = (
+    process.env.STREAM_PROXY_PASSWORD || process.env.PROXY_PASSWORD || ""
+).trim();
+
 const configuredProxyUrlsFromEnv = (process.env.STREAM_PROXY_URLS || "")
     .split(",")
     .map((v) => v.trim())
@@ -46,22 +50,14 @@ const isSelfProxyNode = (url: string) => {
 };
 
 const externalConfiguredProxyUrls = configuredProxyUrlsFromEnv.filter((url) => !isSelfProxyNode(url));
-const hasHokoConfigured = externalConfiguredProxyUrls.some((url) =>
-    url.toLowerCase().includes("hoko.tatakai.me")
-);
-const hasMokoConfigured = externalConfiguredProxyUrls.some((url) =>
-    url.toLowerCase().includes("moko.tatakai.me")
-);
-
-const configuredProxyUrls = hasHokoConfigured && hasMokoConfigured
+const configuredProxyUrls = externalConfiguredProxyUrls.length > 0
     ? externalConfiguredProxyUrls
-    : DEFAULT_STREAM_PROXY_URLS;
+    : STREAM_PROXY_PASSWORD
+      ? DEFAULT_STREAM_PROXY_URLS
+      : [];
 const balancerUrls = configuredProxyUrls;
 
 const DEFAULT_REFERER = process.env.STREAM_PROXY_REFERER || "https://megacloud.club/";
-const STREAM_PROXY_PASSWORD = (
-    process.env.STREAM_PROXY_PASSWORD || process.env.PROXY_PASSWORD || ""
-).trim();
 const DEFAULT_USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const FALLBACK_UPSTREAM_PROXY_URL = (
@@ -271,10 +267,14 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
     }
 
     let targetOrigin = "";
+    let targetHost = "";
     try {
-        targetOrigin = new URL(targetUrl).origin;
+        const parsedTarget = new URL(targetUrl);
+        targetOrigin = parsedTarget.origin;
+        targetHost = parsedTarget.hostname.toLowerCase();
     } catch {
         targetOrigin = "";
+        targetHost = "";
     }
 
     const refererCandidates = Array.from(
@@ -306,6 +306,8 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
             "Accept-Language": "en-US,en;q=0.9",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
+            "Sec-Fetch-Dest": isPlaylistRequest ? "empty" : "video",
+            "Sec-Fetch-Mode": "cors",
         };
 
         // Forward byte ranges for media segments, but avoid ranged playlist requests.
@@ -315,9 +317,22 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
             headers.Referer = ref;
             try {
                 headers.Origin = new URL(ref).origin;
+                headers["Sec-Fetch-Site"] = headers.Origin === targetOrigin ? "same-origin" : "cross-site";
             } catch {
                 // noop
             }
+        }
+
+        if (!headers.Origin && targetOrigin) {
+            headers.Origin = targetOrigin;
+            headers["Sec-Fetch-Site"] = "same-origin";
+        }
+
+        if (
+            targetHost &&
+            /watching\.onl$|megacloud|rapid-cloud|megaup|rabbitstream|dokicloud/.test(targetHost)
+        ) {
+            headers["Sec-Fetch-Site"] = headers.Origin === targetOrigin ? "same-origin" : "cross-site";
         }
 
         return headers;
