@@ -1,5 +1,5 @@
-import { env } from "../../../config/env.js";
-const SERVER_ORIGIN = env.ANIWATCH_API_HOSTNAME ? `https://${env.ANIWATCH_API_HOSTNAME}` : "";
+import { getPublicApiOrigin } from "../../../config/env.js";
+const SERVER_ORIGIN = getPublicApiOrigin();
 import type { DirectSource } from "./types.js";
 
 

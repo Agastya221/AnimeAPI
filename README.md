@@ -32,3 +32,7 @@ API : https://api.tatakai.me/docs
 - Open machine-readable docs at `http://localhost:4000/api/v2/docs/endpoints-json`
 - Check provider health at `http://localhost:4000/api/v2/anime/health/scrapers`
 - Run tests with `npm test`
+
+## Deployment note
+- Set `ANIWATCH_API_PUBLIC_URL` to your deployed API origin, for example `https://animeapi-production-5e2c.up.railway.app`.
+- If you already use `ANIWATCH_API_HOSTNAME`, the API can derive its public origin from that as well.

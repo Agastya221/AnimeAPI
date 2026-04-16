@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { ProxyBalancer } from "../lib/proxyBalancer.js";
+import { getPublicApiOrigin } from "../config/env.js";
 
 const proxyRouter = new Hono();
 
@@ -131,7 +132,7 @@ const probeProxyNode = async (url: string, proxyPassword?: string) => {
     const start = performance.now();
     try {
         const probeUrl = isSelfProxyNode(url)
-            ? "https://api.tatakai.me/health"
+            ? `${getPublicApiOrigin()}/health`
             : (() => {
                   const joiner = url.includes("?") ? "&" : "?";
                   const params = new URLSearchParams({

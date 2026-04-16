@@ -58,6 +58,12 @@ export const env = cleanEnv(process.env, {
         docs: "https://github.com/ghoshRitesh12/aniwatch-api/blob/main/.env.example#L18",
     }),
 
+    ANIWATCH_API_PUBLIC_URL: url({
+        default: undefined,
+        example: "https://your-production-domain.com",
+        desc: "Explicit public base URL for this API instance. Useful when deployed behind a proxy or custom domain.",
+    }),
+
     ANIWATCH_API_REDIS_CONN_URL: url({
         default: undefined,
         example:
@@ -89,4 +95,18 @@ function isDevEnv(): boolean {
         process.env.NODE_ENV === "development" ||
         process.env.NODE_ENV === "test"
     );
+}
+
+export function getPublicApiOrigin(): string {
+    const explicitPublicUrl = String(env.ANIWATCH_API_PUBLIC_URL || "").trim();
+    if (explicitPublicUrl) {
+        return explicitPublicUrl.replace(/\/+$/, "");
+    }
+
+    const hostname = String(env.ANIWATCH_API_HOSTNAME || "").trim();
+    if (hostname) {
+        return `https://${hostname}`.replace(/\/+$/, "");
+    }
+
+    return `http://localhost:${env.ANIWATCH_API_PORT}`;
 }
