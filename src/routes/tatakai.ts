@@ -11,8 +11,8 @@ const hianime = new HiAnime.Scraper();
 const tatakaiRouter = new Hono<ServerContext>();
 
 const META_RESOLVE_CONCURRENCY = 6;
-const HIANIME_INFO_TIMEOUT_MS = 12000;
-const HIANIME_INFO_RETRY_COUNT = 2;
+const HIANIME_INFO_TIMEOUT_MS = 15000;
+const HIANIME_INFO_RETRY_COUNT = 3;
 
 type IdPair = {
     anilistID: number | null;
@@ -927,7 +927,8 @@ tatakaiRouter.get("/anime/:animeId", async (c) => {
                 return getAnimeInfoReliable(animeId);
             },
             cacheConfig.key,
-            cacheConfig.duration
+            6 * 3600, // 6 hours fresh — anime metadata rarely changes hourly
+            { staleWhileRevalidateSeconds: 7 * 24 * 3600, allowStaleOnError: true }
         );
 
         if (isVerboseLoggingEnabled) {

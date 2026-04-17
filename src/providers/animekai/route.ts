@@ -196,7 +196,6 @@ animekaiRoutes.get("/watch/:episodeId", async (c) => {
   const subOrDub = (dubParam === "true" || dubParam === "1") ? "dub" : "softsub";
   
   const key = `ak:watch:${episodeId}:${subOrDub}`;
-  
   const results = await cache.getOrSet(async () => {
     let streams = await AnimeKai.streams(episodeId, subOrDub);
     if (streams.length === 0) {
@@ -211,6 +210,11 @@ animekaiRoutes.get("/watch/:episodeId", async (c) => {
     }
     return streams;
   }, key, STREAMS_TTL);
+
+  if (!results || results.length === 0) {
+    void cache.delete(key);
+    return c.json({ results: [] });
+  }
 
   return c.json({ results });
 });

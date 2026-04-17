@@ -393,6 +393,19 @@ export class AniwatchAPICache {
         }
     }
 
+    async delete(key: string) {
+        this.localHotCache.delete(key);
+        if (this.enabled && this.client) {
+            try {
+                await (this.client as any).del(key);
+            } catch (err) {
+                logRateLimited(`cache:del:${key}`, () => {
+                    log.warn({ key, err }, "cache redis del failed");
+                });
+            }
+        }
+    }
+
     closeConnection() {
         this.client
             ?.quit()

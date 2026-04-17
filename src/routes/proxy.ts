@@ -149,6 +149,12 @@ export const buildRefererCandidates = (
                 "https://rrr.megaup.cc/",
                 "https://dokicloud.one/",
                 "https://rabbitstream.net/",
+                // watching.onl CDN validates against these origins
+                "https://hianime.to/",
+                "https://aniwatch.to/",
+                "https://watchseries.re/",
+                "https://aniwatchtv.to/",
+                "https://9animetv.to/",
             ].filter(Boolean)
         )
     );
@@ -423,7 +429,7 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
 
         if (
             targetHost &&
-            /watching\.onl$|megacloud|rapid-cloud|megaup|rabbitstream|dokicloud/.test(targetHost)
+            /watching\.onl$|megacloud|rapid-cloud|megaup|rabbitstream|dokicloud|hianime|aniwatch|aniwatchtv|9animetv|watchseries/.test(targetHost)
         ) {
             headers["Sec-Fetch-Site"] = headers.Origin === targetOrigin ? "same-origin" : "cross-site";
         }

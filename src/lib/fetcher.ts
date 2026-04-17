@@ -40,42 +40,47 @@ export const fetcher = async (input: string, detectCfCapcha: boolean, cachePrefi
       Logger.warn(`[${cachePrefix}] Failed to fetch url:`, input, "Status:", status);
 
       if (detectCfCapcha && cf_captcha_status.includes(status)) {
-        if (!cf_signatures.some(sig => text.includes(sig))) {
-          Logger.info(`[${cachePrefix}] CF capcha not detected!`);
-          return;
-        }
+        if (cf_signatures.some(sig => text.includes(sig))) {
+          Logger.info(`[${cachePrefix}] Detected CF Capcha`);
 
-        Logger.info(`[${cachePrefix}] Detected CF Capcha`);
+          for (let i = 1; i <= CF_BYPASS_MAX_TRY; ++i) {
+            Logger.info(`[${cachePrefix}] Bypassing CF Capcha - Try ${i}/${CF_BYPASS_MAX_TRY}`);
 
-        for (let i = 1; i <= CF_BYPASS_MAX_TRY; ++i) {
-          Logger.info(`[${cachePrefix}] Bypassing CF Capcha - Try ${i}/${CF_BYPASS_MAX_TRY}`);
+            const { success, cfClearance, userAgent, ttl } = await getCloudflareClearance(input);
 
-          const { success, cfClearance, userAgent, ttl } = await getCloudflareClearance(input);
+            if (success) {
+              Logger.info(`[${cachePrefix}] Successfully bypassed CF capcha`);
 
-          if (success) {
-            Logger.info(`[${cachePrefix}] Successfully bypassed CF capcha`);
+              const cookieCf = `cf_clearance=${cfClearance};`;
+              const cfCredsToCache = JSON.stringify({ clearnaceCookieString: cookieCf, userAgent });
+              
+              Cache.set(`${cachePrefix}:cf-capcha:creds`, cfCredsToCache, ttl || FALLBACK_CF_COOKIE_TTL);
 
-            const cookieCf = `cf_clearance=${cfClearance};`;
-            const cfCredsToCache = JSON.stringify({ clearnaceCookieString: cookieCf, userAgent });
-            
-            Cache.set(`${cachePrefix}:cf-capcha:creds`, cfCredsToCache, ttl || FALLBACK_CF_COOKIE_TTL);
+              const retryHeaders: Record<string, string> = {
+                ...(init.headers as Record<string, string>),
+                "cookie": cfClearance ? cookieCf : "",
+                "user-agent": userAgent || ""
+              };
 
-            const retryHeaders: Record<string, string> = {
-              ...(init.headers as Record<string, string>),
-              "cookie": cfClearance ? cookieCf : "",
-              "user-agent": userAgent || ""
-            };
+              const data = await fetcher(input, false, cachePrefix, { ...init, headers: retryHeaders });
 
-            const data = await fetcher(input, false, cachePrefix, { ...init, headers: retryHeaders });
-
-            if (data && data.status >= 200 && data.status <= 299) {
-              return data;
+              if (data && data.status >= 200 && data.status <= 299) {
+                return data;
+              }
             }
           }
-        }
 
-        Logger.error(`[${cachePrefix}] Failed to Bypass CF Capcha - returning`);
+          Logger.error(`[${cachePrefix}] Failed to Bypass CF Capcha - returning`);
+        } else {
+          Logger.info(`[${cachePrefix}] CF capcha not detected in ${status} response`);
+        }
       }
+
+      // Non-OK response (and not a successfully bypassed CF challenge).
+      // Return success:false so callers can detect genuine upstream errors
+      // (403 from CDN, 503 temporarily unavailable) rather than treating
+      // them as a successful empty-body fetch which causes "Missing link in sources data".
+      return { success: false, status, text };
     }
 
     return { success: true, status, text };

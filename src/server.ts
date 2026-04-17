@@ -479,8 +479,15 @@ async function logCacheStartupStatus() {
 
         void (async () => {
             const status = await logCacheStartupStatus();
-            if (status.redis.enabled && status.redis.state === "ready") {
-                void prewarmAnimeKaiCache();
+            // Always prewarm: the local hot-cache benefits even when Redis is not configured.
+            // Previously this was gated on redis.enabled which caused the prewarm to silently
+            // skip when running in local-memory-only mode.
+            void prewarmAnimeKaiCache();
+            if (status.redis.configured && status.redis.state !== "ready") {
+                log.warn(
+                    { redisState: status.redis.state, lastError: status.redis.lastError },
+                    "aniwatch-api: Redis configured but not ready at startup; serving from local memory cache"
+                );
             }
         })();
     });
