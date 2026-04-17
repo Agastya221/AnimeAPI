@@ -101,17 +101,20 @@ export class AniwatchAPICache {
         client.on("ready", () => {
             this.runtimeState = "ready";
             this.lastError = null;
+            log.info("✅ Redis cache successfully connected and ready!");
         });
         client.on("error", (err: unknown) => {
             this.runtimeState = "error";
-            this.lastError =
-                err instanceof Error ? err.message : String(err || "Unknown redis error");
+            const errMsg = err instanceof Error ? err.message : String(err || "Unknown redis error");
+            this.lastError = errMsg;
+            log.warn({ error: errMsg }, "⚠️ Redis connection error");
         });
         client.on("close", () => {
             this.runtimeState = this.enabled ? "connecting" : "disabled";
         });
         client.on("reconnecting", () => {
             this.runtimeState = "connecting";
+            log.info("♻️ Redis is reconnecting...");
         });
     }
 
