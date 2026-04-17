@@ -1,5 +1,23 @@
+/**
+ * hianimeCompat.ts
+ *
+ * Fallback stream extractor.
+ *
+ * This runs ONLY when the primary native HiAnime library (hianime.getEpisodeSources)
+ * fails. The call chain is:
+ *   resolveHianimeStreamResponse  →  hianime.getEpisodeSources  [primary]
+ *                                 →  extractCompatStreamingInfo  [fallback — this file]
+ *
+ * Strategy here (in order):
+ *   1. AnimeKai watch API — /api/v2/anime/animekai/watch/:id (via self HTTP call)
+ *      Uses MegaUp player; CDN is datacenter-friendly.
+ *   2. Empty result — signals caller to show "no stream" UI.
+ *
+ * Kaido direct-scraping has been removed permanently.
+ * The watching.onl CDN (Kaido HD-2) blocks Railway datacenter IPs unconditionally.
+ */
+
 import axios from "axios";
-import * as cheerio from "cheerio";
 
 type StreamType = "sub" | "dub" | "raw";
 
@@ -29,232 +47,138 @@ export type CompatStreamResults = {
     servers: CompatServer[];
 };
 
-const V1_BASE = process.env.ANIWATCH_DOMAIN || "kaido.to";
-const V4_BASE = process.env.ANIWATCH_DOMAIN || "kaido.to";
-const FALLBACK_HD1 = "megaplay.buzz";
-const FALLBACK_HD2 = "vidwish.live";
+/** Base URL to call our own API (avoids double-decode when calling back to self) */
+const SELF_BASE = (() => {
+    const explicit = process.env.ANIWATCH_API_SELF_URL || "";
+    if (explicit) return explicit.replace(/\/+$/, "");
+    const railwayDomain = process.env.RAILWAY_PUBLIC_DOMAIN || "";
+    if (railwayDomain) return `https://${railwayDomain}`;
+    const port = process.env.ANIWATCH_API_PORT || "4000";
+    return `http://localhost:${port}`;
+})();
 
-const normalizeServerName = (name: string): string => {
-    const serverName = name.trim().toLowerCase();
-    switch (serverName) {
-        case "megacloud":
-        case "rapidcloud":
-        case "vidcloud":
-        case "hd-1":
-            return "HD-1";
-        case "vidsrc":
-        case "vidstreaming":
-        case "hd-2":
-            return "HD-2";
-        case "t-cloud":
-        case "hd-3":
-            return "HD-3";
-        default:
-            return name;
-    }
-};
+const API_TIMEOUT = 12_000;
 
-export async function extractCompatServers(id: string): Promise<CompatServer[]> {
-    try {
-        const resp = await axios.get(
-            `https://${V1_BASE}/ajax/episode/servers?episodeId=${id}`,
-            {
-                headers: {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Accept": "application/json, text/javascript, */*; q=0.01",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Referer": `https://${V1_BASE}/watch/${id}`
-                }
-            }
-        );
-        const $ = cheerio.load(resp.data.html);
-        const serverData: CompatServer[] = [];
-
-        $(".server-item").each((_, element) => {
-            const data_id = String($(element).attr("data-id") || "");
-            const server_id = String($(element).attr("data-server-id") || "");
-            const type = String($(element).attr("data-type") || "sub") as StreamType;
-            const originalName = $(element).find("a").text().trim();
-
-            serverData.push({
-                type,
-                data_id,
-                server_id,
-                serverName: normalizeServerName(originalName),
-            });
-        });
-
-        return serverData;
-    } catch {
-        return [];
-    }
+function ensureArray<T>(value: unknown): T[] {
+    return Array.isArray(value) ? (value as T[]) : [];
 }
 
-async function decryptSourcesCompat(
-    epID: string,
-    id: string,
-    name: string,
-    type: StreamType,
-    fallback: boolean
-) {
+function pickM3U8(sources: unknown): string {
+    for (const src of ensureArray<any>(sources)) {
+        const u = String(src?.file || src?.url || "");
+        if (u.includes(".m3u8") || u.includes("/hls/")) return u;
+    }
+    for (const src of ensureArray<any>(sources)) {
+        const u = String(src?.file || src?.url || "");
+        if (u) return u;
+    }
+    return "";
+}
+
+// ─── AnimeKai fallback ────────────────────────────────────────────────────────
+
+/**
+ * Attempts to stream from AnimeKai's watch API.
+ * AnimeKai episode IDs look like: slug$ep=NUMBER$token=TOKEN
+ * Only works if the caller has a mapped AnimeKai episode ID.
+ */
+async function fetchFromAnimeKai(
+    episodeId: string,
+    dubbed: boolean
+): Promise<CompatStreamResults | null> {
     try {
-        let decryptedSources: any = null;
-        let iframeURL = "";
+        if (!episodeId.includes("$token=")) return null;
 
-        if (fallback) {
-            const fallbackServer = ["hd-1", "hd-3"].includes(name.toLowerCase())
-                ? FALLBACK_HD1
-                : FALLBACK_HD2;
+        const url =
+            `${SELF_BASE}/api/v2/anime/animekai/watch/${encodeURIComponent(episodeId)}` +
+            `?dub=${dubbed ? "1" : "0"}`;
 
-            iframeURL = `https://${fallbackServer}/stream/s-2/${epID}/${type}`;
+        const { data } = await axios.get(url, { timeout: API_TIMEOUT });
+        const entries: any[] = ensureArray(data?.results);
+        if (entries.length === 0) return null;
 
-            const { data } = await axios.get(iframeURL, {
-                headers: { Referer: `https://${fallbackServer}/` },
-            });
+        const entry = entries[0];
+        const streamFile = pickM3U8(entry?.sources);
+        const iframeUrl = String(entry?.url ?? "");
 
-            const $ = cheerio.load(data);
-            const dataId = $("#megaplay-player").attr("data-id");
-            const { data: decryptedData } = await axios.get(
-                `https://${fallbackServer}/stream/getSources?id=${dataId}`,
-                { headers: { "X-Requested-With": "XMLHttpRequest" } }
-            );
-            decryptedSources = decryptedData;
-        } else {
-            const { data: sourcesData } = await axios.get(
-                `https://${V4_BASE}/ajax/episode/sources?id=${id}`,
-                {
-                    headers: {
-                        "User-Agent":
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    },
-                }
-            );
-
-            const ajaxLink = sourcesData?.link;
-            if (!ajaxLink) return null;
-            iframeURL = ajaxLink;
-
-            const sourceIdMatch = /\/([^/?]+)\?/.exec(ajaxLink);
-            const sourceId = sourceIdMatch?.[1];
-            if (!sourceId) return null;
-
-            const baseUrlMatch = ajaxLink.match(/^(https?:\/\/[^\/]+(?:\/[^\/]+){3})/);
-            if (!baseUrlMatch) return null;
-            const baseUrl = baseUrlMatch[1];
-
-            const sourcesUrl = `${baseUrl}/getSources?id=${sourceId}`;
-            const { data: directData } = await axios.get(sourcesUrl, {
-                headers: {
-                    Accept: "*/*",
-                    "X-Requested-With": "XMLHttpRequest",
-                    Referer: `${ajaxLink}&autoPlay=1&oa=0&asi=1`,
-                    "User-Agent":
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    Origin: baseUrl.match(/^https?:\/\/[^\/]+/)?.[0] || "",
-                },
-            });
-
-            decryptedSources = directData;
-        }
-
-        const streamFile = fallback
-            ? decryptedSources?.sources?.file || ""
-            : Array.isArray(decryptedSources?.sources)
-                ? decryptedSources?.sources?.[0]?.file || ""
-                : typeof decryptedSources?.sources === "object"
-                    ? decryptedSources?.sources?.file || ""
-                    : "";
+        if (!streamFile && !iframeUrl) return null;
 
         return {
-            link: {
-                file: streamFile,
+            streamingLink: [{
+                link: streamFile || "",
                 type: "hls",
-            },
-            tracks: decryptedSources?.tracks || [],
-            intro: decryptedSources?.intro || null,
-            outro: decryptedSources?.outro || null,
-            iframe: iframeURL,
-            server: name,
+                server: String(entry?.name ?? "AnimeKai"),
+                iframe: iframeUrl,
+            }],
+            tracks: ensureArray<any>(entry?.subtitles).map((t: any) => ({
+                file: String(t?.url ?? t?.file ?? ""),
+                label: t?.lang ?? t?.label ?? undefined,
+                kind: "captions",
+                default: false,
+            })),
+            intro: entry?.intro
+                ? { start: Number(entry.intro[0] ?? entry.intro.start ?? 0), end: Number(entry.intro[1] ?? entry.intro.end ?? 0) }
+                : null,
+            outro: entry?.outro
+                ? { start: Number(entry.outro[0] ?? entry.outro.start ?? 0), end: Number(entry.outro[1] ?? entry.outro.end ?? 0) }
+                : null,
+            server: String(entry?.name ?? "AnimeKai"),
+            servers: entries.map((e: any) => ({
+                type: (e?.isDub ? "dub" : "sub") as StreamType,
+                data_id: String(e?.name ?? ""),
+                server_id: String(e?.name ?? ""),
+                serverName: String(e?.name ?? "AnimeKai"),
+            })),
         };
     } catch {
         return null;
     }
 }
 
-// CDN priority: lower index = preferred. netmagcdn serves HD-1 (Vidcloud) and is datacenter-friendly.
-// watching.onl serves HD-2 (MegaCloud) and blocks Railway/datacenter IPs with CF 403.
-const SERVER_PRIORITY: Record<string, number> = {
-    "hd-1": 0,  // Vidcloud → netmagcdn.com  ✓ datacenter-OK
-    "hd-3": 1,  // T-Cloud                   ✓ datacenter-OK
-    "hd-2": 2,  // MegaCloud → watching.onl  ✗ datacenter-BLOCKED
-};
+// ─── Compat server list (used by /api/servers/:id) ───────────────────────────
 
-const getServerPriority = (serverName: string): number =>
-    SERVER_PRIORITY[serverName.toLowerCase()] ?? 1;
+/**
+ * Returns server list. Since Kaido is gone, we return a static placeholder
+ * that at least tells the frontend which servers are conceptually available.
+ * The actual server list comes from hianime.getEpisodeServers() in the main route.
+ */
+export async function extractCompatServers(_episodeId: string): Promise<CompatServer[]> {
+    // Return empty — the main router uses hianime.getEpisodeServers() directly.
+    // If needed, we could call SELF_BASE/api/v2/hianime/episode/servers here.
+    return [];
+}
 
+// ─── Main export ──────────────────────────────────────────────────────────────
+
+/**
+ * Called as a FALLBACK when hianime.getEpisodeSources() fails.
+ * 
+ * Tries:
+ *   1. AnimeKai (if episode ID has $token= format)
+ *   2. Returns empty result
+ */
 export async function extractCompatStreamingInfo(
     id: string,
     name: string,
     type: StreamType,
-    fallback = false
+    _fallback = false
 ): Promise<CompatStreamResults> {
-    const servers = await extractCompatServers(id.split("?ep=").pop() || id);
+    const empty = (): CompatStreamResults => ({
+        streamingLink: [],
+        tracks: [],
+        intro: null,
+        outro: null,
+        server: name,
+        servers: [],
+    });
 
-    // ── 1. Build candidate list with priority sorting ───────────────────────────
-    let candidates: CompatServer[] = [];
+    const dubbed = type === "dub";
 
-    // Exact name + type match
-    const exactMatch = servers.filter(
-        (s) => s.serverName.toLowerCase() === name.toLowerCase() && s.type.toLowerCase() === type.toLowerCase()
-    );
-    if (exactMatch.length > 0) candidates = exactMatch;
-
-    // Same type, any server – sorted by datacenter-friendliness
-    if (candidates.length === 0) {
-        candidates = servers
-            .filter((s) => s.type.toLowerCase() === type.toLowerCase())
-            .sort((a, b) => getServerPriority(a.serverName) - getServerPriority(b.serverName));
+    // Try AnimeKai if the episode ID suggests it's an AnimeKai ID
+    const akResult = await fetchFromAnimeKai(id, dubbed);
+    if (akResult && (akResult.streamingLink[0]?.link || akResult.streamingLink[0]?.iframe)) {
+        return akResult;
     }
 
-    // Raw category fallback
-    if (candidates.length === 0) {
-        candidates = servers
-            .filter((s) => s.type.toLowerCase() === "raw")
-            .sort((a, b) => getServerPriority(a.serverName) - getServerPriority(b.serverName));
-    }
-
-    // Absolute last resort: any server sorted by priority
-    if (candidates.length === 0 && servers.length > 0) {
-        candidates = [...servers].sort((a, b) => getServerPriority(a.serverName) - getServerPriority(b.serverName));
-    }
-
-    if (candidates.length === 0) {
-        return { streamingLink: [], tracks: [], intro: null, outro: null, server: normalizeServerName(name), servers: [] };
-    }
-
-    // ── 2. Try each candidate in priority order until one succeeds ──────────────
-    for (const selected of candidates) {
-        const streamingLink = await decryptSourcesCompat(id, selected.data_id, selected.serverName, selected.type, fallback);
-
-        if (!streamingLink || !streamingLink.link.file) continue;
-
-        return {
-            streamingLink: [
-                {
-                    link: streamingLink.link.file,
-                    type: streamingLink.link.type,
-                    server: streamingLink.server,
-                    iframe: streamingLink.iframe,
-                },
-            ],
-            tracks: streamingLink.tracks || [],
-            intro: streamingLink.intro || null,
-            outro: streamingLink.outro || null,
-            server: streamingLink.server,
-            servers,
-        };
-    }
-
-    // All candidates failed
-    return { streamingLink: [], tracks: [], intro: null, outro: null, server: normalizeServerName(name), servers };
+    return empty();
 }
