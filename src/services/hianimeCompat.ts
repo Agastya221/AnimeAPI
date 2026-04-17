@@ -39,6 +39,7 @@ const normalizeServerName = (name: string): string => {
     switch (serverName) {
         case "megacloud":
         case "rapidcloud":
+        case "vidcloud":
         case "hd-1":
             return "HD-1";
         case "vidsrc":
