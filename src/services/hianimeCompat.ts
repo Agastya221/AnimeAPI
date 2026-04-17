@@ -29,8 +29,8 @@ export type CompatStreamResults = {
     servers: CompatServer[];
 };
 
-const V1_BASE = "aniwatchtv.to";
-const V4_BASE = "9animetv.to";
+const V1_BASE = process.env.ANIWATCH_DOMAIN || "kaido.to";
+const V4_BASE = process.env.ANIWATCH_DOMAIN || "kaido.to";
 const FALLBACK_HD1 = "megaplay.buzz";
 const FALLBACK_HD2 = "vidwish.live";
 
@@ -112,7 +112,7 @@ async function decryptSourcesCompat(
             decryptedSources = decryptedData;
         } else {
             const { data: sourcesData } = await axios.get(
-                `https://${V4_BASE}/ajax/episode/sources?id=${id}`,
+                `https://${V4_BASE}/ajax/v2/episode/sources?id=${id}`,
                 {
                     headers: {
                         "User-Agent":
