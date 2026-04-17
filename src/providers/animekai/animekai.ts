@@ -6,11 +6,24 @@ import { USER_AGENT } from "../animepahe/scraper/index.js";
 import { fetcher } from "../../lib/fetcher.js";
 import type {
   AnimeKaiEpisode,
+  AnimeKaiEpisodes,
   AnimeKaiInfo,
+  AnimeKaiMeta,
   AnimeKaiPagedResult,
   AnimeKaiSearchItem,
   AnimeKaiServer,
 } from "./types.js";
+
+type AnimeKaiMetaInternal = AnimeKaiMeta & {
+  aniId?: string;
+};
+
+type EpisodeAvailability = {
+  hasSub?: boolean;
+  hasDub?: boolean;
+  subCount?: number;
+  dubCount?: number;
+};
 
 export class AnimeKai {
   private static baseUrl = ANIMEKAI_BASE_URL;
@@ -329,180 +342,280 @@ export class AnimeKai {
     }
   }
 
+  // ─── Anime Meta / Episodes ───────────────────────────────────────────────────
+
+  private static parseAvailability($: cheerio.CheerioAPI): EpisodeAvailability {
+    const hasSub = $(".entity-scroll > .info > span.sub").length > 0;
+    const hasDub = $(".entity-scroll > .info > span.dub").length > 0;
+    const subCount = parseInt($(".entity-scroll > .info > span.sub").text()) || 0;
+    const dubCount = parseInt($(".entity-scroll > .info > span.dub").text()) || 0;
+
+    return {
+      hasSub,
+      hasDub,
+      subCount,
+      dubCount,
+    };
+  }
+
+  private static toSubOrDub(availability: EpisodeAvailability): "sub" | "dub" | "both" {
+    if (availability.hasSub && availability.hasDub) return "both";
+    if (availability.hasDub) return "dub";
+    return "sub";
+  }
+
+  private static parseMetaDocument(animeSlug: string, html: string): AnimeKaiMetaInternal {
+    const $ = cheerio.load(html);
+    const availability = this.parseAvailability($);
+
+    const meta: AnimeKaiMetaInternal = {
+      id: animeSlug,
+      title: $(".entity-scroll > .title").text().trim(),
+      japaneseTitle: $(".entity-scroll > .title").attr("data-jp")?.trim(),
+      image: $("div.poster > div > img").attr("src"),
+      description: $(".entity-scroll > .desc").text().trim(),
+      type: $(".entity-scroll > .info")
+        .children()
+        .last()
+        .text()
+        .toUpperCase(),
+      url: `${this.baseUrl}/watch/${animeSlug}`,
+      hasSub: availability.hasSub,
+      hasDub: availability.hasDub,
+      subCount: availability.subCount,
+      dubCount: availability.dubCount,
+      subOrDub: this.toSubOrDub(availability),
+      aniId: $(".rate-box#anime-rating").attr("data-id") || undefined,
+    };
+
+    $(".entity-scroll > .detail div").each(function () {
+      const text = $(this).text().trim();
+      if (text.startsWith("Genres:")) {
+        meta.genres = text
+          .replace("Genres:", "")
+          .split(",")
+          .map((g: string) => g.trim());
+      }
+    });
+
+    meta.status = $(".entity-scroll > .detail")
+      .find("div:contains('Status') > span")
+      .text()
+      .trim();
+    meta.season = $(".entity-scroll > .detail")
+      .find("div:contains('Premiered') > span")
+      .text()
+      .trim();
+    meta.duration = $(".entity-scroll > .detail")
+      .find("div:contains('Duration') > span")
+      .text()
+      .trim();
+
+    $(".entity-scroll > .detail div")
+      .filter((_, el) => $(el).text().includes("Links:"))
+      .find("a")
+      .each((_, el) => {
+        const href = $(el).attr("href") ?? "";
+        if (href.includes("myanimelist")) {
+          meta.malId = href.match(/anime\/(\d+)/)?.[1];
+        }
+        if (href.includes("anilist")) {
+          meta.anilistId = href.match(/anime\/(\d+)/)?.[1];
+        }
+      });
+
+    meta.recommendations = [];
+    $("section.sidebar-section:not(#related-anime) .aitem-col .aitem").each((_, ele) => {
+      const aTag = $(ele);
+      const recId = aTag.attr("href")?.replace("/watch/", "") ?? "";
+      meta.recommendations!.push({
+        id: recId,
+        title: aTag.find(".title").text().trim(),
+        url: `${this.baseUrl}${aTag.attr("href")}`,
+        image:
+          aTag.attr("style")?.match(/background-image:\s*url\('(.+?)'\)/)?.[1] ??
+          aTag.find("img").attr("src"),
+        japaneseTitle: aTag.find(".title").attr("data-jp")?.trim(),
+        type: aTag.find(".info").children().last().text().trim(),
+        sub: parseInt(aTag.find(".info span.sub").text()) || 0,
+        dub: parseInt(aTag.find(".info span.dub").text()) || 0,
+        episodes:
+          parseInt(aTag.find(".info").children().eq(-2).text().trim()) ||
+          parseInt(aTag.find(".info span.sub").text()) ||
+          0,
+      });
+    });
+
+    meta.relations = [];
+    $("section#related-anime .aitem-col a.aitem").each((_, el) => {
+      const aTag = $(el);
+      const infoBox = aTag.find(".info");
+      const relId = aTag.attr("href")?.replace("/watch/", "") ?? "";
+      const bolds = infoBox.find("span > b");
+      let episodes = 0;
+      let type = "";
+      let relationType = "";
+      bolds.each((_, b) => {
+        const text = $(b).text().trim();
+        if ($(b).hasClass("text-muted")) {
+          relationType = text;
+        } else if (/^\d+$/.test(text)) {
+          episodes = parseInt(text);
+        } else {
+          type = text;
+        }
+      });
+      meta.relations!.push({
+        id: relId,
+        title: aTag.find(".title").text().trim(),
+        url: `${this.baseUrl}${aTag.attr("href")}`,
+        image: aTag.attr("style")?.match(/background-image:\s*url\('(.+?)'\)/)?.[1],
+        japaneseTitle: aTag.find(".title").attr("data-jp")?.trim(),
+        type: type.toUpperCase(),
+        sub: parseInt(infoBox.find(".sub").text()) || 0,
+        dub: parseInt(infoBox.find(".dub").text()) || 0,
+        relationType,
+        episodes,
+      });
+    });
+
+    return meta;
+  }
+
+  private static toPublicMeta(meta: AnimeKaiMetaInternal | null): AnimeKaiMeta | null {
+    if (!meta) return null;
+    const { aniId, ...publicMeta } = meta;
+    return publicMeta;
+  }
+
+  static async meta(id: string): Promise<AnimeKaiMeta | null> {
+    const meta = await this.metaInternal(id);
+    return this.toPublicMeta(meta);
+  }
+
+  static async metaInternal(id: string): Promise<AnimeKaiMetaInternal | null> {
+    try {
+      const animeSlug = id.split("$")[0]!;
+      const html = await this.request(`${this.baseUrl}/watch/${animeSlug}`);
+      return this.parseMetaDocument(animeSlug, html);
+    } catch (err) {
+      Logger.error(`AnimeKai meta error: ${String(err)}`);
+      return null;
+    }
+  }
+
+  private static async fetchEpisodesHtml(animeSlug: string, aniId: string): Promise<string> {
+    const episodesToken = await MegaUp.generateToken(aniId);
+    const episodesRes = await fetcher(
+      `${this.baseUrl}/ajax/episodes/list?ani_id=${aniId}&_=${episodesToken}`,
+      true,
+      "animekai",
+      {
+        headers: {
+          ...this.headers(),
+          "X-Requested-With": "XMLHttpRequest",
+          Referer: `${this.baseUrl}/watch/${animeSlug}`,
+        },
+      }
+    );
+
+    if (!episodesRes?.success) {
+      throw new Error("Episodes fetch failed");
+    }
+
+    const epData = JSON.parse(episodesRes.text);
+    return typeof epData.result === "string" ? epData.result : "";
+  }
+
+  private static buildEpisodePayload(
+    animeSlug: string,
+    epHtml: string,
+    availability: EpisodeAvailability = {}
+  ): AnimeKaiEpisodes {
+    const $$ = cheerio.load(epHtml);
+    const episodes: AnimeKaiEpisode[] = [];
+    const totalEpisodes = $$("div.eplist > ul > li").length;
+
+    $$("div.eplist > ul > li > a").each((_, el) => {
+      const numAttr = $$(el).attr("num") || "0";
+      const tokenAttr = $$(el).attr("token") || "";
+      const number = parseInt(numAttr);
+      const isSubbed =
+        availability.subCount !== undefined
+          ? number <= availability.subCount
+          : Boolean(availability.hasSub);
+      const isDubbed =
+        availability.dubCount !== undefined
+          ? number <= availability.dubCount
+          : Boolean(availability.hasDub);
+
+      episodes.push({
+        id: `${animeSlug}$ep=${numAttr}$token=${tokenAttr}`,
+        number,
+        title: $$(el).children("span").text().trim(),
+        isFiller: $$(el).hasClass("filler"),
+        isSubbed,
+        isDubbed,
+        url: `${this.baseUrl}/watch/${animeSlug}${$$(el).attr("href")}ep=${numAttr}`,
+      });
+    });
+
+    return {
+      id: animeSlug,
+      totalEpisodes,
+      subCount: availability.subCount,
+      dubCount: availability.dubCount,
+      episodes,
+    };
+  }
+
+  static async episodes(
+    id: string,
+    options: { aniId?: string | null; availability?: EpisodeAvailability } = {}
+  ): Promise<AnimeKaiEpisodes | null> {
+    try {
+      const animeSlug = id.split("$")[0]!;
+      const aniId = options.aniId || null;
+      if (!aniId) {
+        Logger.warn(`[AnimeKai] Missing aniId for episodes lookup: ${animeSlug}`);
+        return null;
+      }
+
+      const epHtml = await this.fetchEpisodesHtml(animeSlug, aniId);
+      return this.buildEpisodePayload(animeSlug, epHtml, options.availability);
+    } catch (err) {
+      Logger.error(`AnimeKai episodes error: ${String(err)}`);
+      return null;
+    }
+  }
+
   // ─── Anime Info ──────────────────────────────────────────────────────────────
 
   static async info(id: string): Promise<AnimeKaiInfo | null> {
     try {
-      const animeSlug = id.split("$")[0]!;
-      const html = await this.request(`${this.baseUrl}/watch/${animeSlug}`);
-      const $ = cheerio.load(html);
+      const meta = await this.metaInternal(id);
+      if (!meta) return null;
 
-      const info: any = {
-        id: animeSlug,
-        title: $(".entity-scroll > .title").text().trim(),
-        japaneseTitle: $(".entity-scroll > .title").attr("data-jp")?.trim(),
-        image: $("div.poster > div > img").attr("src"),
-        description: $(".entity-scroll > .desc").text().trim(),
-        type: $(".entity-scroll > .info")
-          .children()
-          .last()
-          .text()
-          .toUpperCase(),
-        url: `${this.baseUrl}/watch/${animeSlug}`,
+      const episodes = await this.episodes(id, {
+        aniId: meta.aniId,
+        availability: {
+          hasSub: meta.hasSub,
+          hasDub: meta.hasDub,
+          subCount: meta.subCount,
+          dubCount: meta.dubCount,
+        },
+      });
+
+      const publicMeta = this.toPublicMeta(meta);
+      if (!publicMeta) return null;
+
+      return {
+        ...publicMeta,
+        totalEpisodes:
+          episodes?.totalEpisodes ??
+          (Math.max(meta.subCount || 0, meta.dubCount || 0) || undefined),
+        episodes: episodes?.episodes || [],
       };
-
-      // Sub / dub availability
-      const hasSub = $(".entity-scroll > .info > span.sub").length > 0;
-      const hasDub = $(".entity-scroll > .info > span.dub").length > 0;
-      info.hasSub = hasSub;
-      info.hasDub = hasDub;
-      info.subOrDub = hasSub && hasDub ? "both" : hasDub ? "dub" : "sub";
-
-      // Genres
-      $(".entity-scroll > .detail div").each(function () {
-        const text = $(this).text().trim();
-        if (text.startsWith("Genres:")) {
-          info.genres = text
-            .replace("Genres:", "")
-            .split(",")
-            .map((g: string) => g.trim());
-        }
-      });
-
-      // Status
-      const statusText = $(".entity-scroll > .detail")
-        .find("div:contains('Status') > span")
-        .text()
-        .trim();
-      info.status = statusText;
-
-      info.season = $(".entity-scroll > .detail")
-        .find("div:contains('Premiered') > span")
-        .text()
-        .trim();
-      info.duration = $(".entity-scroll > .detail")
-        .find("div:contains('Duration') > span")
-        .text()
-        .trim();
-
-      // External links (MAL / AniList)
-      $(".entity-scroll > .detail div")
-        .filter((_, el) => $(el).text().includes("Links:"))
-        .find("a")
-        .each((_, el) => {
-          const href = $(el).attr("href") ?? "";
-          if (href.includes("myanimelist")) {
-            info.malId = href.match(/anime\/(\d+)/)?.[1];
-          }
-          if (href.includes("anilist")) {
-            info.anilistId = href.match(/anime\/(\d+)/)?.[1];
-          }
-        });
-
-      // Recommendations
-      info.recommendations = [];
-      $("section.sidebar-section:not(#related-anime) .aitem-col .aitem").each((_, ele) => {
-        const aTag = $(ele);
-        const recId = aTag.attr("href")?.replace("/watch/", "");
-        info.recommendations!.push({
-          id: recId,
-          title: aTag.find(".title").text().trim(),
-          url: `${this.baseUrl}${aTag.attr("href")}`,
-          image:
-            aTag.attr("style")?.match(/background-image:\s*url\('(.+?)'\)/)?.[1] ??
-            aTag.find("img").attr("src"),
-          japaneseTitle: aTag.find(".title").attr("data-jp")?.trim(),
-          type: aTag.find(".info").children().last().text().trim(),
-          sub: parseInt(aTag.find(".info span.sub").text()) || 0,
-          dub: parseInt(aTag.find(".info span.dub").text()) || 0,
-          episodes:
-            parseInt(aTag.find(".info").children().eq(-2).text().trim()) ||
-            parseInt(aTag.find(".info span.sub").text()) ||
-            0,
-        });
-      });
-
-      // Relations
-      info.relations = [];
-      $("section#related-anime .aitem-col a.aitem").each((_, el) => {
-        const aTag = $(el);
-        const infoBox = aTag.find(".info");
-        const relId = aTag.attr("href")?.replace("/watch/", "") ?? "";
-        const bolds = infoBox.find("span > b");
-        let episodes = 0;
-        let type = "";
-        let relationType = "";
-        bolds.each((_, b) => {
-          const text = $(b).text().trim();
-          if ($(b).hasClass("text-muted")) {
-            relationType = text;
-          } else if (/^\d+$/.test(text)) {
-            episodes = parseInt(text);
-          } else {
-            type = text;
-          }
-        });
-        info.relations!.push({
-          id: relId,
-          title: aTag.find(".title").text().trim(),
-          url: `${this.baseUrl}${aTag.attr("href")}`,
-          image: aTag.attr("style")?.match(/background-image:\s*url\('(.+?)'\)/)?.[1],
-          japaneseTitle: aTag.find(".title").attr("data-jp")?.trim(),
-          type: type.toUpperCase(),
-          sub: parseInt(infoBox.find(".sub").text()) || 0,
-          dub: parseInt(infoBox.find(".dub").text()) || 0,
-          relationType,
-          episodes,
-        });
-      });
-
-      // Episodes
-      const aniId = $(".rate-box#anime-rating").attr("data-id");
-      if (!aniId) return info;
-
-      const episodesToken = await MegaUp.generateToken(aniId);
-      const episodesRes = await fetcher(
-        `${this.baseUrl}/ajax/episodes/list?ani_id=${aniId}&_=${episodesToken}`,
-        true,
-        "animekai",
-        {
-          headers: {
-            ...this.headers(),
-            "X-Requested-With": "XMLHttpRequest",
-            Referer: `${this.baseUrl}/watch/${animeSlug}`,
-          },
-        }
-      );
-      if (!episodesRes?.success) throw new Error("Episodes fetch failed");
-      const epData = JSON.parse(episodesRes.text);
-      const epHtml = epData.result;
-
-      if (typeof epHtml === "string") {
-        const $$ = cheerio.load(epHtml);
-        info.totalEpisodes = $$("div.eplist > ul > li").length;
-        info.episodes = [];
-
-        const subCount = parseInt($(".entity-scroll > .info > span.sub").text()) || 0;
-        const dubCount = parseInt($(".entity-scroll > .info > span.dub").text()) || 0;
-
-        $$("div.eplist > ul > li > a").each((_, el) => {
-          const numAttr = $$(el).attr("num")!;
-          const tokenAttr = $$(el).attr("token")!;
-          const number = parseInt(numAttr);
-
-          info.episodes.push({
-            id: `${animeSlug}$ep=${numAttr}$token=${tokenAttr}`,
-            number,
-            title: $$(el).children("span").text().trim(),
-            isFiller: $$(el).hasClass("filler"),
-            isSubbed: number <= subCount,
-            isDubbed: number <= dubCount,
-            url: `${this.baseUrl}/watch/${animeSlug}${$$(el).attr("href")}ep=${numAttr}`,
-          });
-        });
-      }
-
-      return info;
     } catch (err) {
       Logger.error(`AnimeKai info error: ${String(err)}`);
       return null;
@@ -661,10 +774,21 @@ export class AnimeKai {
     episodeNumber: number
   ): Promise<string | null> {
     try {
-      const info = await this.info(animeId);
-      if (!info) return null;
+      const meta = await this.metaInternal(animeId);
+      if (!meta?.aniId) return null;
 
-      const episode = info.episodes.find((ep: AnimeKaiEpisode) => ep.number === episodeNumber);
+      const episodeData = await this.episodes(animeId, {
+        aniId: meta.aniId,
+        availability: {
+          hasSub: meta.hasSub,
+          hasDub: meta.hasDub,
+          subCount: meta.subCount,
+          dubCount: meta.dubCount,
+        },
+      });
+      if (!episodeData) return null;
+
+      const episode = episodeData.episodes.find((ep: AnimeKaiEpisode) => ep.number === episodeNumber);
       return episode ? episode.id : null;
     } catch (err) {
       Logger.error(`AnimeKai getEpisodeSession error: ${String(err)}`);
@@ -674,11 +798,11 @@ export class AnimeKai {
 
   static async getMappingsAndName(id: string): Promise<{ mappings: any | null; name: string } | null> {
     try {
-      const info = await this.info(id);
-      if (!info) return null;
+      const meta = await this.meta(id);
+      if (!meta) return null;
 
-      const malId = info.malId ? parseInt(info.malId) : null;
-      const anilistId = info.anilistId ? parseInt(info.anilistId) : null;
+      const malId = meta.malId ? parseInt(meta.malId) : null;
+      const anilistId = meta.anilistId ? parseInt(meta.anilistId) : null;
 
       const mappings = (malId || anilistId) ? {
           mal_id: malId,
@@ -696,7 +820,7 @@ export class AnimeKai {
 
       return {
         mappings,
-        name: info.title,
+        name: meta.title,
       };
     } catch (err) {
       Logger.error(`AnimeKai getMappingsAndName error: ${String(err)}`);

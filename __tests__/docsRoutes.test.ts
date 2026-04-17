@@ -13,6 +13,7 @@ describe("documentation routes", () => {
     expect(data.system).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ path: "/api/v2/docs/endpoints-json" }),
+        expect.objectContaining({ path: "/api/v2/health/cache" }),
         expect.objectContaining({ path: "/api/v2/anime/health/scrapers" }),
       ])
     );
@@ -22,6 +23,7 @@ describe("documentation routes", () => {
     const content = buildEndpointsMarkdown();
     expect(content).toContain("## System");
     expect(content).toContain("/api/v2/docs/endpoints-json");
+    expect(content).toContain("/api/v2/health/cache");
     expect(content).toContain("(query: animeEpisodeId, server, category)");
   });
 

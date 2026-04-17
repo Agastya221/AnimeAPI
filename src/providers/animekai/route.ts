@@ -1,14 +1,50 @@
 import { Hono } from "hono";
 import { AnimeKai } from "./animekai.js";
 import { cache } from "../../config/cache.js";
+import { Logger } from "../../utils/logger.js";
 
 // TTL Constants mapped closely to desidub for consistency
 const SHORT_TTL = 1800; // 30 mins (search, new-releases, recent)
 const HOME_TTL = 3600; // 1 hr (spotlight, schedule)
-const LONG_TTL = 86400; // 24 hrs (info, complete, genres)
+const META_TTL = 86400; // 24 hrs
+const EPISODES_TTL = 43200; // 12 hrs
+const LONG_TTL = 86400; // 24 hrs (complete, genres)
 const STREAMS_TTL = 1800; // 30 mins (streams)
 
 export const animekaiRoutes = new Hono();
+
+const getMetaCacheKey = (id: string) => `ak:meta:${id}`;
+const getEpisodesCacheKey = (id: string) => `ak:episodes:${id}`;
+
+async function getCachedAnimeKaiMetaInternal(id: string) {
+  return cache.getOrSet(() => AnimeKai.metaInternal(id), getMetaCacheKey(id), META_TTL);
+}
+
+async function getCachedAnimeKaiEpisodes(id: string) {
+  const meta = await getCachedAnimeKaiMetaInternal(id);
+  if (!meta?.aniId) return null;
+
+  return cache.getOrSet(
+    () =>
+      AnimeKai.episodes(id, {
+        aniId: meta.aniId,
+        availability: {
+          hasSub: meta.hasSub,
+          hasDub: meta.hasDub,
+          subCount: meta.subCount,
+          dubCount: meta.dubCount,
+        },
+      }),
+    getEpisodesCacheKey(id),
+    EPISODES_TTL
+  );
+}
+
+function toPublicAnimeKaiMeta(meta: Awaited<ReturnType<typeof AnimeKai.metaInternal>>) {
+  if (!meta) return null;
+  const { aniId, ...publicMeta } = meta;
+  return publicMeta;
+}
 
 animekaiRoutes.get("/search/:query", async (c) => {
   const query = c.req.param("query");
@@ -115,13 +151,42 @@ animekaiRoutes.get("/genre/:genre", async (c) => {
   return c.json(data);
 });
 
+animekaiRoutes.get("/meta/:id?", async (c) => {
+  const id = c.req.param("id");
+  if (!id) return c.json({ message: "id is required" }, 400);
+
+  const meta = toPublicAnimeKaiMeta(await getCachedAnimeKaiMetaInternal(id));
+  if (!meta) return c.json({ message: "Anime not found" }, 404);
+
+  return c.json(meta);
+});
+
+animekaiRoutes.get("/episodes/:id?", async (c) => {
+  const id = c.req.param("id");
+  if (!id) return c.json({ message: "id is required" }, 400);
+
+  const episodes = await getCachedAnimeKaiEpisodes(id);
+  if (!episodes) return c.json({ message: "Episodes not found" }, 404);
+
+  return c.json(episodes);
+});
+
 animekaiRoutes.get("/info/:id?", async (c) => {
   const id = c.req.param("id");
   if (!id) return c.json({ message: "id is required" }, 400);
-  const key = `ak:info:${id}`;
-  const res = await cache.getOrSet(() => AnimeKai.info(id), key, LONG_TTL);
-  if (!res) return c.json({ message: "Anime not found" }, 404);
-  return c.json(res);
+
+  const meta = toPublicAnimeKaiMeta(await getCachedAnimeKaiMetaInternal(id));
+  if (!meta) return c.json({ message: "Anime not found" }, 404);
+
+  const episodes = await getCachedAnimeKaiEpisodes(id);
+
+  return c.json({
+    ...meta,
+    totalEpisodes:
+      episodes?.totalEpisodes ??
+      (Math.max(meta.subCount || 0, meta.dubCount || 0) || undefined),
+    episodes: episodes?.episodes || [],
+  });
 });
 
 animekaiRoutes.get("/watch/:episodeId", async (c) => {
@@ -161,3 +226,44 @@ animekaiRoutes.get("/servers/:episodeId", async (c) => {
 
   return c.json({ servers });
 });
+
+export async function prewarmAnimeKaiCache(): Promise<void> {
+  try {
+    const [spotlight, releases, recent] = await Promise.all([
+      cache.getOrSet(() => AnimeKai.spotlight(), "ak:spotlight", HOME_TTL),
+      cache.getOrSet(() => AnimeKai.newReleases(1), "ak:new-releases:1", SHORT_TTL),
+      cache.getOrSet(() => AnimeKai.recentlyUpdated(1), "ak:recent-episodes:1", SHORT_TTL),
+    ]);
+
+    const ids = Array.from(
+      new Set(
+        [
+          ...(Array.isArray(spotlight) ? spotlight : []).map((item: any) => String(item?.id || "")),
+          ...(releases?.results || []).map((item: any) => String(item?.id || "")),
+          ...(recent?.results || []).map((item: any) => String(item?.id || "")),
+        ].filter(Boolean)
+      )
+    ).slice(0, 10);
+
+    const queue = [...ids];
+    const workerCount = Math.min(2, queue.length);
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (queue.length > 0) {
+        const nextId = queue.shift();
+        if (!nextId) continue;
+
+        try {
+          await getCachedAnimeKaiMetaInternal(nextId);
+          await getCachedAnimeKaiEpisodes(nextId);
+        } catch (err) {
+          Logger.warn(`AnimeKai prewarm failed for ${nextId}: ${String(err)}`);
+        }
+      }
+    });
+
+    await Promise.all(workers);
+    Logger.info(`[AnimeKai] Prewarm complete for ${ids.length} title(s)`);
+  } catch (err) {
+    Logger.warn(`AnimeKai prewarm failed: ${String(err)}`);
+  }
+}

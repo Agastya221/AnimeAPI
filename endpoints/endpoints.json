@@ -14,6 +14,7 @@
     { "method": "GET", "path": "/docs-content/:section" },
     { "method": "GET", "path": "/api/v2/docs/llm" },
     { "method": "GET", "path": "/api/v2/docs/endpoints-json" },
+    { "method": "GET", "path": "/api/v2/health/cache" },
     { "method": "GET", "path": "/api/v2/anime/health/scrapers" }
   ],
   "compatibility": [
@@ -133,6 +134,8 @@
       { "method": "GET", "path": "/api/v2/anime/animekai/specials", "query": ["page"] },
       { "method": "GET", "path": "/api/v2/anime/animekai/genres" },
       { "method": "GET", "path": "/api/v2/anime/animekai/genre/:genre", "query": ["page"] },
+      { "method": "GET", "path": "/api/v2/anime/animekai/meta/:id" },
+      { "method": "GET", "path": "/api/v2/anime/animekai/episodes/:id" },
       { "method": "GET", "path": "/api/v2/anime/animekai/info/:id" },
       { "method": "GET", "path": "/api/v2/anime/animekai/watch/:episodeId", "query": ["dub"] },
       { "method": "GET", "path": "/api/v2/anime/animekai/servers/:episodeId", "query": ["dub"] },

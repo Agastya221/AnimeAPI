@@ -44,7 +44,17 @@ export type AnimeKaiRelatedItem = z.infer<typeof animekaiRelatedItemSchema>;
 
 // ─── Anime Info ───────────────────────────────────────────────────────────────
 
-export const animekaiInfoSchema = z.object({
+export const animekaiEpisodeSchema = z.object({
+  id: z.string(),
+  number: z.number(),
+  title: z.string(),
+  isFiller: z.boolean(),
+  isSubbed: z.boolean(),
+  isDubbed: z.boolean(),
+  url: z.string(),
+});
+
+export const animekaiMetaSchema = z.object({
   id: z.string(),
   title: z.string(),
   japaneseTitle: z.string().optional().nullable(),
@@ -60,23 +70,29 @@ export const animekaiInfoSchema = z.object({
   anilistId: z.string().optional(),
   hasSub: z.boolean().optional(),
   hasDub: z.boolean().optional(),
+  subCount: z.number().optional(),
+  dubCount: z.number().optional(),
   subOrDub: z.enum(["sub", "dub", "both"]).optional(),
   genres: z.array(z.string()).optional(),
   recommendations: z.array(animekaiRelatedItemSchema).optional(),
   relations: z.array(animekaiRelatedItemSchema).optional(),
-  episodes: z.array(
-    z.object({
-      id: z.string(),
-      number: z.number(),
-      title: z.string(),
-      isFiller: z.boolean(),
-      isSubbed: z.boolean(),
-      isDubbed: z.boolean(),
-      url: z.string(),
-    })
-  ),
 });
 
+export const animekaiEpisodesSchema = z.object({
+  id: z.string(),
+  totalEpisodes: z.number(),
+  subCount: z.number().optional(),
+  dubCount: z.number().optional(),
+  episodes: z.array(animekaiEpisodeSchema),
+});
+
+export const animekaiInfoSchema = animekaiMetaSchema.extend({
+  totalEpisodes: z.number().optional(),
+  episodes: z.array(animekaiEpisodeSchema),
+});
+
+export type AnimeKaiMeta = z.infer<typeof animekaiMetaSchema>;
+export type AnimeKaiEpisodes = z.infer<typeof animekaiEpisodesSchema>;
 export type AnimeKaiInfo = z.infer<typeof animekaiInfoSchema>;
 export type AnimeKaiEpisode = AnimeKaiInfo["episodes"][number];
 

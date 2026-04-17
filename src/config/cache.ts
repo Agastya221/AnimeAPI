@@ -16,14 +16,46 @@ type GetOrSetOptions = {
     ttlJitterRatio?: number;
 };
 
+type CacheRuntimeState = "disabled" | "connecting" | "ready" | "error";
+
+type RedisRuntimeStatus = {
+    configured: boolean;
+    enabled: boolean;
+    state: CacheRuntimeState;
+    lastPingMs: number | null;
+    lastError: string | null;
+};
+
+type CacheRuntimeStatus = {
+    redis: RedisRuntimeStatus;
+    cache: {
+        localHotCacheEntries: number;
+        defaultExpirySeconds: number;
+        staleWhileRevalidateSeconds: number;
+    };
+};
+
+type RedisClientLike = Pick<Redis, "get" | "set" | "quit" | "ping" | "on"> & {
+    status?: string;
+};
+
+type CacheConstructorOptions = {
+    redisUrl?: string | null;
+    redisFactory?: (url: string) => RedisClientLike;
+};
+
 export class AniwatchAPICache {
     private static instance: AniwatchAPICache | null = null;
 
-    private client: Redis | null;
+    private client: RedisClientLike | null;
+    private configured = false;
     public enabled: boolean = false;
     private inflightFetches = new Map<string, Promise<unknown>>();
     private localHotCache = new Map<string, CacheEnvelope<unknown>>();
     private localHotCacheMaxEntries = 2000;
+    private runtimeState: CacheRuntimeState = "disabled";
+    private lastPingMs: number | null = null;
+    private lastError: string | null = null;
 
     static enabled = false;
     // 5 mins, 5 * 60
@@ -32,10 +64,26 @@ export class AniwatchAPICache {
     static DEFAULT_STALE_WHILE_REVALIDATE_SECONDS =
         env.ANIWATCH_API_STALE_WHILE_REVALIDATE;
 
-    constructor() {
-        const redisConnURL = env.ANIWATCH_API_REDIS_CONN_URL;
-        this.enabled = AniwatchAPICache.enabled = Boolean(redisConnURL);
-        this.client = this.enabled ? new Redis(String(redisConnURL)) : null;
+    constructor(options: CacheConstructorOptions = {}) {
+        const redisConnURL =
+            options.redisUrl !== undefined
+                ? options.redisUrl
+                : env.ANIWATCH_API_REDIS_CONN_URL;
+        const createClient =
+            options.redisFactory ??
+            ((url: string) => new Redis(url));
+
+        this.configured = Boolean(redisConnURL);
+        this.enabled = AniwatchAPICache.enabled = this.configured;
+        this.runtimeState = this.enabled ? "connecting" : "disabled";
+        this.client =
+            this.enabled && redisConnURL
+                ? createClient(String(redisConnURL))
+                : null;
+
+        if (this.client) {
+            this.registerClientEvents(this.client);
+        }
     }
 
     static getInstance() {
@@ -43,6 +91,89 @@ export class AniwatchAPICache {
             AniwatchAPICache.instance = new AniwatchAPICache();
         }
         return AniwatchAPICache.instance;
+    }
+
+    private registerClientEvents(client: RedisClientLike) {
+        client.on("connect", () => {
+            this.runtimeState = "connecting";
+            this.lastError = null;
+        });
+        client.on("ready", () => {
+            this.runtimeState = "ready";
+            this.lastError = null;
+        });
+        client.on("error", (err: unknown) => {
+            this.runtimeState = "error";
+            this.lastError =
+                err instanceof Error ? err.message : String(err || "Unknown redis error");
+        });
+        client.on("close", () => {
+            this.runtimeState = this.enabled ? "connecting" : "disabled";
+        });
+        client.on("reconnecting", () => {
+            this.runtimeState = "connecting";
+        });
+    }
+
+    getClient() {
+        return this.client;
+    }
+
+    async refreshPing(): Promise<number | null> {
+        if (!this.enabled || !this.client) return null;
+
+        const start = Date.now();
+        try {
+            await this.client.ping();
+            this.lastPingMs = Date.now() - start;
+            if (this.runtimeState !== "error") {
+                this.runtimeState = "ready";
+            }
+            return this.lastPingMs;
+        } catch (err) {
+            this.runtimeState = "error";
+            this.lastError =
+                err instanceof Error ? err.message : String(err || "Unknown redis error");
+            return null;
+        }
+    }
+
+    async getStatus(options: { refreshPing?: boolean } = {}): Promise<CacheRuntimeStatus> {
+        if (options.refreshPing) {
+            await this.refreshPing();
+        }
+
+        return {
+            redis: {
+                configured: this.configured,
+                enabled: this.enabled,
+                state: this.runtimeState,
+                lastPingMs: this.lastPingMs,
+                lastError: this.lastError,
+            },
+            cache: {
+                localHotCacheEntries: this.localHotCache.size,
+                defaultExpirySeconds: AniwatchAPICache.DEFAULT_CACHE_EXPIRY_SECONDS,
+                staleWhileRevalidateSeconds:
+                    AniwatchAPICache.DEFAULT_STALE_WHILE_REVALIDATE_SECONDS,
+            },
+        };
+    }
+
+    async waitUntilReady(timeoutMs: number = 1500): Promise<CacheRuntimeStatus> {
+        if (!this.enabled || !this.client) {
+            return this.getStatus();
+        }
+
+        const deadline = Date.now() + Math.max(0, timeoutMs);
+        while (Date.now() < deadline) {
+            if (this.runtimeState === "ready" || this.runtimeState === "error") {
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+
+        return this.getStatus({ refreshPing: this.runtimeState === "ready" });
     }
 
     /**
@@ -268,9 +399,14 @@ export class AniwatchAPICache {
             ?.then(() => {
                 this.client = null;
                 AniwatchAPICache.instance = null;
+                this.runtimeState = "disabled";
+                this.lastPingMs = null;
                 log.info("aniwatch-api redis connection closed and cache instance reset");
             })
             .catch((err) => {
+                this.runtimeState = "error";
+                this.lastError =
+                    err instanceof Error ? err.message : String(err || "Unknown redis error");
                 log.error({ err }, "aniwatch-api error while closing redis connection");
             });
     }

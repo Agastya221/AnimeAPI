@@ -3,7 +3,11 @@ import { env } from "../config/env.js";
 import { log, logRateLimited } from "../config/logger.js";
 
 const HEALTH_PATHS = new Set(["/health", "/v"]);
-const SLOW_REQUEST_MS = 1500;
+const DEFAULT_SLOW_REQUEST_MS = 1500;
+const STREAM_PROXY_SLOW_REQUEST_MS = 5000;
+
+const getSlowRequestThresholdMs = (pathname: string) =>
+    pathname.includes("/m3u8-streaming-proxy") ? STREAM_PROXY_SLOW_REQUEST_MS : DEFAULT_SLOW_REQUEST_MS;
 
 export const logging: MiddlewareHandler = async (c, next) => {
     const startedAt = Date.now();
@@ -14,6 +18,7 @@ export const logging: MiddlewareHandler = async (c, next) => {
     if (HEALTH_PATHS.has(pathname)) return;
 
     const durationMs = Date.now() - startedAt;
+    const slowRequestThresholdMs = getSlowRequestThresholdMs(pathname);
     const status = c.res.status;
     const method = c.req.method;
 
@@ -38,8 +43,8 @@ export const logging: MiddlewareHandler = async (c, next) => {
         return;
     }
 
-    if (status >= 400 || durationMs >= SLOW_REQUEST_MS) {
-        logRateLimited(`req:warn:${spamKey}:${durationMs >= SLOW_REQUEST_MS ? "slow" : "http"}`, () => {
+    if (status >= 400 || durationMs >= slowRequestThresholdMs) {
+        logRateLimited(`req:warn:${spamKey}:${durationMs >= slowRequestThresholdMs ? "slow" : "http"}`, () => {
             log.warn(payload, status >= 400 ? "request warning" : "slow request");
         }, 10000);
         return;

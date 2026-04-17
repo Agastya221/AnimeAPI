@@ -65,8 +65,113 @@ const FALLBACK_UPSTREAM_PROXY_URL = (
     process.env.STREAM_PROXY_DEV_URL ||
     ""
 ).trim();
+const REFERER_CACHE_TTL_MS = Number(process.env.STREAM_PROXY_REFERER_CACHE_TTL_MS || 30 * 60 * 1000);
+const REFERER_FAILURE_TTL_MS = Number(process.env.STREAM_PROXY_REFERER_FAILURE_TTL_MS || 10 * 60 * 1000);
 
 const balancer = new ProxyBalancer(balancerUrls);
+const successfulRefererByHost = new Map<string, { referer: string; expiresAt: number }>();
+const failedRefererByHost = new Map<string, number>();
+
+const normalizeHostKey = (host: string) => host.trim().toLowerCase();
+
+const getRefererFailureKey = (host: string, referer: string) =>
+    `${normalizeHostKey(host)}|${referer.trim()}`;
+
+const pruneRefererMemory = (now = Date.now()) => {
+    for (const [host, entry] of successfulRefererByHost.entries()) {
+        if (entry.expiresAt <= now) {
+            successfulRefererByHost.delete(host);
+        }
+    }
+
+    for (const [key, expiresAt] of failedRefererByHost.entries()) {
+        if (expiresAt <= now) {
+            failedRefererByHost.delete(key);
+        }
+    }
+};
+
+export const resetRefererMemory = () => {
+    successfulRefererByHost.clear();
+    failedRefererByHost.clear();
+};
+
+export const rememberSuccessfulReferer = (host: string, referer: string, now = Date.now()) => {
+    const normalizedHost = normalizeHostKey(host);
+    const normalizedReferer = referer.trim();
+    if (!normalizedHost || !normalizedReferer) return;
+
+    successfulRefererByHost.set(normalizedHost, {
+        referer: normalizedReferer,
+        expiresAt: now + REFERER_CACHE_TTL_MS,
+    });
+    failedRefererByHost.delete(getRefererFailureKey(normalizedHost, normalizedReferer));
+};
+
+export const rememberRefererFailure = (host: string, referer: string, status: number, now = Date.now()) => {
+    const normalizedHost = normalizeHostKey(host);
+    const normalizedReferer = referer.trim();
+    if (!normalizedHost || !normalizedReferer || (status !== 401 && status !== 403)) return;
+
+    failedRefererByHost.set(
+        getRefererFailureKey(normalizedHost, normalizedReferer),
+        now + REFERER_FAILURE_TTL_MS
+    );
+};
+
+export const buildRefererCandidates = (
+    targetHost: string,
+    referer: string,
+    defaultReferer: string,
+    targetOrigin: string
+) => {
+    const now = Date.now();
+    pruneRefererMemory(now);
+
+    const normalizedHost = normalizeHostKey(targetHost);
+    const rememberedReferer = normalizedHost
+        ? successfulRefererByHost.get(normalizedHost)?.referer || ""
+        : "";
+
+    const baseCandidates = Array.from(
+        new Set(
+            [
+                rememberedReferer,
+                referer,
+                defaultReferer,
+                targetOrigin ? `${targetOrigin}/` : "",
+                referer.replace("megacloud.blog", "megacloud.club"),
+                referer.replace("megacloud.club", "megacloud.blog"),
+                "https://megacloud.blog/",
+                "https://megacloud.club/",
+                "https://megacloud.tv/",
+                "https://megaup.cc/",
+                "https://rrr.megaup.cc/",
+                "https://dokicloud.one/",
+                "https://rabbitstream.net/",
+            ].filter(Boolean)
+        )
+    );
+
+    if (!normalizedHost) {
+        return baseCandidates;
+    }
+
+    return baseCandidates
+        .map((candidate, index) => ({
+            candidate,
+            index,
+            preferred: candidate === rememberedReferer ? 0 : 1,
+            failedRecently:
+                (failedRefererByHost.get(getRefererFailureKey(normalizedHost, candidate)) || 0) > now ? 1 : 0,
+        }))
+        .sort((left, right) => {
+            if (left.preferred !== right.preferred) return left.preferred - right.preferred;
+            if (left.failedRecently !== right.failedRecently) return left.failedRecently - right.failedRecently;
+            return left.index - right.index;
+        })
+        .map((entry) => entry.candidate);
+};
 
 const withTimeout = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
     const controller = new AbortController();
@@ -277,23 +382,11 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
         targetHost = "";
     }
 
-    const refererCandidates = Array.from(
-        new Set(
-            [
-                referer,
-                DEFAULT_REFERER,
-                targetOrigin ? `${targetOrigin}/` : "",
-                referer.replace("megacloud.blog", "megacloud.club"),
-                referer.replace("megacloud.club", "megacloud.blog"),
-                "https://megacloud.blog/",
-                "https://megacloud.club/",
-                "https://megacloud.tv/",
-                "https://megaup.cc/",
-                "https://rrr.megaup.cc/",
-                "https://dokicloud.one/",
-                "https://rabbitstream.net/",
-            ].filter(Boolean)
-        )
+    const refererCandidates = buildRefererCandidates(
+        targetHost,
+        referer,
+        DEFAULT_REFERER,
+        targetOrigin
     );
 
     const buildHeaders = (ref: string): Record<string, string> => {
@@ -358,6 +451,7 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
             via: "direct",
             reason: "no acceptable upstream response",
         };
+        const attemptFailures: Array<{ status: number; referer: string; via: "direct" | "balancer"; reason: string }> = [];
 
         const isAcceptableResponse = async (
             response: Response,
@@ -370,6 +464,8 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
                     via: context.via,
                     reason: `upstream status ${response.status}`,
                 };
+                attemptFailures.push(lastFailure);
+                rememberRefererFailure(targetHost, context.referer, response.status);
                 return false;
             }
 
@@ -382,6 +478,7 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
                         via: context.via,
                         reason: "invalid or non-HLS playlist payload",
                     };
+                    attemptFailures.push(lastFailure);
                     return false;
                 }
             }
@@ -393,6 +490,7 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
                     via: context.via,
                     reason: "non-media response payload",
                 };
+                attemptFailures.push(lastFailure);
                 return false;
             }
 
@@ -425,8 +523,6 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
                         upstream = viaBalancer;
                         successfulReferer = ref;
                         break;
-                    } else {
-                        console.warn(`[Proxy Balancer] Failed for ${targetUrl} with ref ${ref}. Status: ${viaBalancer.status}`);
                     }
                 } catch (e: any) {
                     lastFailure = {
@@ -435,7 +531,7 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
                         via: "balancer",
                         reason: e?.message ? `balancer error: ${e.message}` : "balancer error",
                     };
-                    console.error(`[Proxy Balancer] Error for ${targetUrl}:`, e.message);
+                    attemptFailures.push(lastFailure);
                 }
             }
 
@@ -445,8 +541,6 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
                     upstream = direct;
                     successfulReferer = ref;
                     break;
-                } else {
-                    console.warn(`[Proxy Direct] Failed for ${targetUrl} with ref ${ref}. Status: ${direct.status}`);
                 }
             } catch (e: any) {
                 lastFailure = {
@@ -455,7 +549,7 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
                     via: "direct",
                     reason: e?.message ? `direct fetch error: ${e.message}` : "direct fetch error",
                 };
-                console.error(`[Proxy Direct] Error for ${targetUrl}:`, e.message);
+                attemptFailures.push(lastFailure);
             }
         }
 
@@ -501,8 +595,6 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
                         upstream = fallbackResponse;
                         successfulReferer = fallbackRef;
                         playlistBaseUrl = fallbackRequestUrl;
-                    } else {
-                        console.warn(`[Proxy Fallback] Failed for ${targetUrl}. Status: ${fallbackResponse.status}`);
                     }
                 } catch (e: any) {
                     lastFailure = {
@@ -511,12 +603,18 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
                         via: "direct",
                         reason: e?.message ? `fallback proxy error: ${e.message}` : "fallback proxy error",
                     };
-                    console.error(`[Proxy Fallback] Error for ${targetUrl}:`, e.message);
+                    attemptFailures.push(lastFailure);
                 }
             }
         }
 
         if (!upstream) {
+            if (attemptFailures.length > 0) {
+                console.warn(
+                    `[Proxy Stream] Exhausted ${attemptFailures.length} attempts for ${targetUrl}. ` +
+                        `Last failure via ${lastFailure.via} with ref ${lastFailure.referer}: ${lastFailure.reason}`
+                );
+            }
             const statusCode = lastFailure.status >= 400 && lastFailure.status < 600 ? lastFailure.status : 502;
             return c.json(
                 {
@@ -530,6 +628,8 @@ proxyRouter.get("/m3u8-streaming-proxy", async (c) => {
                 { status: statusCode as any }
             );
         }
+
+        rememberSuccessfulReferer(targetHost, successfulReferer);
 
         const contentType = upstream.headers.get("content-type") || "";
         const isPlaylist = contentType.includes("mpegurl") || targetUrl.includes(".m3u8");

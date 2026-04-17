@@ -11,12 +11,14 @@ import { execGracefulShutdown } from "./utils.js";
 import { DeploymentEnv, env, SERVERLESS_ENVIRONMENTS } from "./config/env.js";
 import { errorHandler, notFoundHandler } from "./config/errorHandler.js";
 import type { ServerContext } from "./config/context.js";
+import { cache } from "./config/cache.js";
 
 import { hianimeRouter } from "./routes/hianime.js";
 import { streamRouter } from "./routes/stream.js";
 import { proxyRouter } from "./routes/proxy.js";
 import { mediaRouter } from "./routes/media.js";
 import { animeRoutes } from "./providers/route.js";
+import { prewarmAnimeKaiCache } from "./providers/animekai/route.js";
 import { mangaRoutes } from "./providers/manga/route.js";
 import { logging } from "./middleware/logging.js";
 import { cacheConfigSetter, cacheControl } from "./middleware/cache.js";
@@ -58,6 +60,9 @@ app.use("/", serveStatic({ root: "public" }));
 // }
 
 app.get("/health", (c) => c.text("daijoubu", { status: 200 }));
+app.get(`${BASE_PATH}/health/cache`, async (c) =>
+    c.json(await cache.getStatus({ refreshPing: true }))
+);
 app.get("/v", async (c) =>
     c.text(
         `aniwatch-api: v${"version" in pkgJson && pkgJson?.version ? pkgJson.version : "-1"}\n` +
@@ -409,6 +414,49 @@ app.basePath(BASE_PATH).get("/anicrush", (c) =>
 app.notFound(notFoundHandler);
 app.onError(errorHandler);
 
+async function logCacheStartupStatus() {
+    const status = await cache.waitUntilReady(1500);
+    const redis = status.redis;
+
+    if (!redis.configured) {
+        log.info(
+            {
+                redisConfigured: false,
+                cacheMode: "local-memory",
+                localHotCacheEntries: status.cache.localHotCacheEntries,
+            },
+            "aniwatch-api cache startup: redis not configured; using local memory cache"
+        );
+        return status;
+    }
+
+    if (redis.state === "ready") {
+        log.info(
+            {
+                redisConfigured: redis.configured,
+                redisEnabled: redis.enabled,
+                redisState: redis.state,
+                lastPingMs: redis.lastPingMs,
+                cacheMode: "redis",
+            },
+            "aniwatch-api cache startup: redis ready"
+        );
+        return status;
+    }
+
+    log.warn(
+        {
+            redisConfigured: redis.configured,
+            redisEnabled: redis.enabled,
+            redisState: redis.state,
+            lastError: redis.lastError,
+            cacheMode: "local-memory-fallback",
+        },
+        "aniwatch-api cache startup: redis did not become ready"
+    );
+    return status;
+}
+
 //
 (function () {
     /*
@@ -424,11 +472,18 @@ app.onError(errorHandler);
     const server = serve({
         port: env.ANIWATCH_API_PORT,
         fetch: app.fetch,
-    }).addListener("listening", () =>
+    }).addListener("listening", () => {
         log.info(
             `aniwatch-api RUNNING at http://localhost:${env.ANIWATCH_API_PORT}`
-        )
-    );
+        );
+
+        void (async () => {
+            const status = await logCacheStartupStatus();
+            if (status.redis.enabled && status.redis.state === "ready") {
+                void prewarmAnimeKaiCache();
+            }
+        })();
+    });
 
     process.on("SIGINT", () => execGracefulShutdown(server));
     process.on("SIGTERM", () => execGracefulShutdown(server));
