@@ -181,6 +181,17 @@ async function decryptSourcesCompat(
     }
 }
 
+// CDN priority: lower index = preferred. netmagcdn serves HD-1 (Vidcloud) and is datacenter-friendly.
+// watching.onl serves HD-2 (MegaCloud) and blocks Railway/datacenter IPs with CF 403.
+const SERVER_PRIORITY: Record<string, number> = {
+    "hd-1": 0,  // Vidcloud → netmagcdn.com  ✓ datacenter-OK
+    "hd-3": 1,  // T-Cloud                   ✓ datacenter-OK
+    "hd-2": 2,  // MegaCloud → watching.onl  ✗ datacenter-BLOCKED
+};
+
+const getServerPriority = (serverName: string): number =>
+    SERVER_PRIORITY[serverName.toLowerCase()] ?? 1;
+
 export async function extractCompatStreamingInfo(
     id: string,
     name: string,
@@ -189,74 +200,61 @@ export async function extractCompatStreamingInfo(
 ): Promise<CompatStreamResults> {
     const servers = await extractCompatServers(id.split("?ep=").pop() || id);
 
-    let requestedServer = servers.filter(
-        (server) =>
-            server.serverName.toLowerCase() === name.toLowerCase() &&
-            server.type.toLowerCase() === type.toLowerCase()
+    // ── 1. Build candidate list with priority sorting ───────────────────────────
+    let candidates: CompatServer[] = [];
+
+    // Exact name + type match
+    const exactMatch = servers.filter(
+        (s) => s.serverName.toLowerCase() === name.toLowerCase() && s.type.toLowerCase() === type.toLowerCase()
     );
+    if (exactMatch.length > 0) candidates = exactMatch;
 
-    if (requestedServer.length === 0) {
-        requestedServer = servers.filter(
-            (server) =>
-                server.serverName.toLowerCase() === name.toLowerCase() &&
-                server.type.toLowerCase() === "raw"
-        );
+    // Same type, any server – sorted by datacenter-friendliness
+    if (candidates.length === 0) {
+        candidates = servers
+            .filter((s) => s.type.toLowerCase() === type.toLowerCase())
+            .sort((a, b) => getServerPriority(a.serverName) - getServerPriority(b.serverName));
     }
 
-    if (requestedServer.length === 0) {
-        requestedServer = servers.filter(
-            (server) => server.type.toLowerCase() === type.toLowerCase()
-        );
+    // Raw category fallback
+    if (candidates.length === 0) {
+        candidates = servers
+            .filter((s) => s.type.toLowerCase() === "raw")
+            .sort((a, b) => getServerPriority(a.serverName) - getServerPriority(b.serverName));
     }
 
-    if (requestedServer.length === 0 && servers.length > 0) {
-        requestedServer = [servers[0]];
+    // Absolute last resort: any server sorted by priority
+    if (candidates.length === 0 && servers.length > 0) {
+        candidates = [...servers].sort((a, b) => getServerPriority(a.serverName) - getServerPriority(b.serverName));
     }
 
-    if (requestedServer.length === 0) {
+    if (candidates.length === 0) {
+        return { streamingLink: [], tracks: [], intro: null, outro: null, server: normalizeServerName(name), servers: [] };
+    }
+
+    // ── 2. Try each candidate in priority order until one succeeds ──────────────
+    for (const selected of candidates) {
+        const streamingLink = await decryptSourcesCompat(id, selected.data_id, selected.serverName, selected.type, fallback);
+
+        if (!streamingLink || !streamingLink.link.file) continue;
+
         return {
-            streamingLink: [],
-            tracks: [],
-            intro: null,
-            outro: null,
-            server: normalizeServerName(name),
-            servers: [],
-        };
-    }
-
-    const selected = requestedServer[0];
-    const streamingLink = await decryptSourcesCompat(
-        id,
-        selected.data_id,
-        selected.serverName,
-        selected.type,
-        fallback
-    );
-
-    if (!streamingLink) {
-        return {
-            streamingLink: [],
-            tracks: [],
-            intro: null,
-            outro: null,
-            server: selected.serverName,
+            streamingLink: [
+                {
+                    link: streamingLink.link.file,
+                    type: streamingLink.link.type,
+                    server: streamingLink.server,
+                    iframe: streamingLink.iframe,
+                },
+            ],
+            tracks: streamingLink.tracks || [],
+            intro: streamingLink.intro || null,
+            outro: streamingLink.outro || null,
+            server: streamingLink.server,
             servers,
         };
     }
 
-    return {
-        streamingLink: [
-            {
-                link: streamingLink.link.file,
-                type: streamingLink.link.type,
-                server: streamingLink.server,
-                iframe: streamingLink.iframe,
-            },
-        ],
-        tracks: streamingLink.tracks || [],
-        intro: streamingLink.intro || null,
-        outro: streamingLink.outro || null,
-        server: streamingLink.server,
-        servers,
-    };
+    // All candidates failed
+    return { streamingLink: [], tracks: [], intro: null, outro: null, server: normalizeServerName(name), servers };
 }
