@@ -56,7 +56,15 @@ const normalizeServerName = (name: string): string => {
 export async function extractCompatServers(id: string): Promise<CompatServer[]> {
     try {
         const resp = await axios.get(
-            `https://${V1_BASE}/ajax/v2/episode/servers?episodeId=${id}`
+            `https://${V1_BASE}/ajax/episode/servers?episodeId=${id}`,
+            {
+                headers: {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "application/json, text/javascript, */*; q=0.01",
+                    "X-Requested-With": "XMLHttpRequest",
+                    "Referer": `https://${V1_BASE}/watch/${id}`
+                }
+            }
         );
         const $ = cheerio.load(resp.data.html);
         const serverData: CompatServer[] = [];
@@ -112,7 +120,7 @@ async function decryptSourcesCompat(
             decryptedSources = decryptedData;
         } else {
             const { data: sourcesData } = await axios.get(
-                `https://${V4_BASE}/ajax/v2/episode/sources?id=${id}`,
+                `https://${V4_BASE}/ajax/episode/sources?id=${id}`,
                 {
                     headers: {
                         "User-Agent":
