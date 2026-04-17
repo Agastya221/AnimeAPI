@@ -147,6 +147,8 @@ export const buildRefererCandidates = (
                 "https://megacloud.tv/",
                 "https://megaup.cc/",
                 "https://rrr.megaup.cc/",
+                "https://rapid-cloud.co/",
+                "https://rapid-cloud.ru/",
                 "https://dokicloud.one/",
                 "https://rabbitstream.net/",
                 // watching.onl CDN validates against these origins
@@ -155,6 +157,7 @@ export const buildRefererCandidates = (
                 "https://watchseries.re/",
                 "https://aniwatchtv.to/",
                 "https://9animetv.to/",
+                "https://kaido.to/",
             ].filter(Boolean)
         )
     );
