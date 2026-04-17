@@ -77,7 +77,15 @@ export async function getHome() {
     if (title && slug && url) featured.push({ title, slug, url, poster: img, type: "series" });
   });
 
-  const unique = Array.from(new Map(featured.map(i => [i.slug, i])).values()).slice(0, 20);
+  const bestFeatured = new Map();
+  featured.forEach(item => {
+    const existing = bestFeatured.get(item.slug);
+    if (!existing || (item.poster && !existing.poster)) {
+      bestFeatured.set(item.slug, item);
+    }
+  });
+
+  const unique = Array.from(bestFeatured.values()).slice(0, 20);
   return { featured: unique };
 }
 

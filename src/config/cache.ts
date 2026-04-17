@@ -63,10 +63,12 @@ export class AniwatchAPICache {
 
         const cached = await this.getCacheEnvelope<T>(key);
         if (cached && now < cached.expiresAt) {
+            log.info({ key, isEnabled: this.enabled }, "Cache HIT (Fresh)");
             return cached.value;
         }
 
         if (cached && now < cached.staleUntil) {
+            log.info({ key, isEnabled: this.enabled }, "Cache HIT (Stale) - Revalidating in background");
             void this.revalidateInBackground<T>(
                 key,
                 dataGetter,
@@ -77,6 +79,7 @@ export class AniwatchAPICache {
             return cached.value;
         }
 
+        log.info({ key, isEnabled: this.enabled }, "Cache MISS - Fetching new data");
         try {
             return await this.fetchAndSet<T>(
                 key,
